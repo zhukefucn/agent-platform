@@ -1,0 +1,17 @@
+version: "3.8"
+
+services:
+  agent-platform:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=sqlite+aiosqlite:///./agent_platform.db
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-change-in-production}
+      - LLM_GATEWAY_API_KEY=${LLM_GATEWAY_API_KEY:-}
+      - LLM_DEFAULT_MODEL=${LLM_DEFAULT_MODEL:-deepseek-chat}
+    volumes:
+      - app_data:/app/data
+
+volumes:
+  app_data:
