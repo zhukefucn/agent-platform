@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.security import HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 
@@ -7,14 +8,19 @@ from app.db.models import UsageRecord, Tenant
 from app.api.v1.auth import decode_token
 
 router = APIRouter()
+security = HTTPBearer(auto_error=False)
+
+
+async def get_current_user(credentials = Depends(security)) -> dict:
+    if not credentials:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    return decode_token(credentials.credentials)
 
 
 @router.get("/stats")
-async def usage_stats(token: str, db: AsyncSession = Depends(get_db)):
-    payload = decode_token(token)
+async def usage_stats(payload: dict = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     tenant_id = payload["tenant_id"]
 
-    # Total usage
     result = await db.execute(
         select(
             func.sum(UsageRecord.total_tokens).label("total_tokens"),
@@ -25,7 +31,6 @@ async def usage_stats(token: str, db: AsyncSession = Depends(get_db)):
     )
     row = result.one()
 
-    # By model
     result = await db.execute(
         select(
             UsageRecord.model,
@@ -37,7 +42,6 @@ async def usage_stats(token: str, db: AsyncSession = Depends(get_db)):
     )
     by_model = [{"model": r[0], "tokens": r[1] or 0, "calls": r[2]} for r in result.all()]
 
-    # Tenant limit
     result = await db.execute(select(Tenant).where(Tenant.id == tenant_id))
     tenant = result.scalar_one()
 

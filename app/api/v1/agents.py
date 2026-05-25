@@ -1,6 +1,5 @@
-import httpx
-import json
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from pydantic import BaseModel
@@ -11,6 +10,7 @@ from app.api.v1.auth import decode_token
 from app.config import settings
 
 router = APIRouter()
+security = HTTPBearer(auto_error=False)
 
 
 # --- Schemas ---
@@ -18,7 +18,7 @@ router = APIRouter()
 class ChatRequest(BaseModel):
     agent_id: str
     message: str
-    session_id: str | None = None  # null = create new session
+    session_id: str | None = None
 
 
 class ChatMessageResponse(BaseModel):
@@ -42,10 +42,18 @@ class SessionResponse(BaseModel):
     created_at: str
 
 
+# --- Helpers ---
+
+async def get_current_user(credentials = Depends(security)) -> dict:
+    if not credentials:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    return decode_token(credentials.credentials)
+
+
 # --- LLM Router ---
 
 async def call_llm(model: str, messages: list[dict], api_key: str = None) -> dict:
-    """Route to the correct LLM provider based on model name."""
+    import httpx
     model_config = settings.LLM_MODELS.get(model, {})
     base_url = model_config.get("base_url", settings.LLM_GATEWAY_URL)
     key = api_key or settings.LLM_GATEWAY_API_KEY
@@ -74,13 +82,11 @@ async def call_llm(model: str, messages: list[dict], api_key: str = None) -> dic
 
 # --- Endpoints ---
 
-@router.post("/chat", response_model=ChatResponse)
-async def chat(req: ChatRequest, token: str, db: AsyncSession = Depends(get_db)):
-    payload = decode_token(token)
+@router.post("/chat")
+async def chat(req: ChatRequest, payload: dict = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     tenant_id = payload["tenant_id"]
     user_id = payload["sub"]
 
-    # Get agent config
     result = await db.execute(
         select(AgentConfig).where(
             AgentConfig.id == req.agent_id,
@@ -91,7 +97,6 @@ async def chat(req: ChatRequest, token: str, db: AsyncSession = Depends(get_db))
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
 
-    # Get or create session
     session = None
     if req.session_id:
         result = await db.execute(
@@ -109,7 +114,6 @@ async def chat(req: ChatRequest, token: str, db: AsyncSession = Depends(get_db))
         db.add(session)
         await db.flush()
 
-    # Build messages history
     result = await db.execute(
         select(ChatMessage)
         .where(ChatMessage.session_id == session.id)
@@ -122,7 +126,6 @@ async def chat(req: ChatRequest, token: str, db: AsyncSession = Depends(get_db))
         llm_messages.append({"role": msg.role, "content": msg.content})
     llm_messages.append({"role": "user", "content": req.message})
 
-    # Save user message
     user_msg = ChatMessage(
         session_id=session.id,
         role="user",
@@ -130,10 +133,9 @@ async def chat(req: ChatRequest, token: str, db: AsyncSession = Depends(get_db))
     )
     db.add(user_msg)
 
-    # Call LLM
     try:
         llm_response = await call_llm(agent.model, llm_messages)
-    except httpx.HTTPError as e:
+    except Exception as e:
         raise HTTPException(status_code=502, detail=f"LLM call failed: {str(e)}")
 
     assistant_content = llm_response["choices"][0]["message"]["content"]
@@ -142,7 +144,6 @@ async def chat(req: ChatRequest, token: str, db: AsyncSession = Depends(get_db))
     completion_tokens = usage.get("completion_tokens", 0)
     total_tokens = usage.get("total_tokens", 0)
 
-    # Save assistant message
     assistant_msg = ChatMessage(
         session_id=session.id,
         role="assistant",
@@ -152,7 +153,6 @@ async def chat(req: ChatRequest, token: str, db: AsyncSession = Depends(get_db))
     )
     db.add(assistant_msg)
 
-    # Record usage
     usage_record = UsageRecord(
         tenant_id=tenant_id,
         user_id=user_id,
@@ -169,22 +169,15 @@ async def chat(req: ChatRequest, token: str, db: AsyncSession = Depends(get_db))
     return ChatResponse(
         session_id=session.id,
         messages=[
-            ChatMessageResponse(
-                role="user", content=req.message,
-                tokens_used=0, model="",
-            ),
-            ChatMessageResponse(
-                role="assistant", content=assistant_content,
-                tokens_used=total_tokens, model=agent.model,
-            ),
+            ChatMessageResponse(role="user", content=req.message, tokens_used=0, model=""),
+            ChatMessageResponse(role="assistant", content=assistant_content, tokens_used=total_tokens, model=agent.model),
         ],
         total_tokens=total_tokens,
     )
 
 
-@router.get("/sessions", response_model=list[SessionResponse])
-async def list_sessions(token: str, db: AsyncSession = Depends(get_db)):
-    payload = decode_token(token)
+@router.get("/sessions")
+async def list_sessions(payload: dict = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     result = await db.execute(
         select(ChatSession)
         .where(ChatSession.user_id == payload["sub"])

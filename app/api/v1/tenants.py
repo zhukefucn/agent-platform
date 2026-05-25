@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from pydantic import BaseModel
@@ -9,6 +10,7 @@ from app.api.v1.auth import decode_token
 from app.config import settings
 
 router = APIRouter()
+security = HTTPBearer(auto_error=False)
 
 
 # --- Schemas ---
@@ -51,15 +53,16 @@ class AgentResponse(BaseModel):
 
 # --- Helpers ---
 
-def get_current_user(token: str) -> dict:
-    return decode_token(token)
+async def get_current_user(credentials = Depends(security)) -> dict:
+    if not credentials:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    return decode_token(credentials.credentials)
 
 
 # --- Endpoints ---
 
-@router.get("", response_model=list[TenantResponse])
-async def list_tenants(token: str, db: AsyncSession = Depends(get_db)):
-    payload = get_current_user(token)
+@router.get("")
+async def list_tenants(payload: dict = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     if payload["role"] != "admin":
         raise HTTPException(status_code=403, detail="Admin only")
 
@@ -71,9 +74,8 @@ async def list_tenants(token: str, db: AsyncSession = Depends(get_db)):
     ) for t in tenants]
 
 
-@router.post("", response_model=TenantResponse)
-async def create_tenant(req: TenantCreate, token: str, db: AsyncSession = Depends(get_db)):
-    payload = get_current_user(token)
+@router.post("")
+async def create_tenant(req: TenantCreate, payload: dict = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     if payload["role"] != "admin":
         raise HTTPException(status_code=403, detail="Admin only")
 
@@ -94,9 +96,8 @@ async def create_tenant(req: TenantCreate, token: str, db: AsyncSession = Depend
     )
 
 
-@router.get("/agents", response_model=list[AgentResponse])
-async def list_agents(token: str, db: AsyncSession = Depends(get_db)):
-    payload = get_current_user(token)
+@router.get("/agents")
+async def list_agents(payload: dict = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     result = await db.execute(
         select(AgentConfig).where(AgentConfig.tenant_id == payload["tenant_id"])
     )
@@ -108,10 +109,8 @@ async def list_agents(token: str, db: AsyncSession = Depends(get_db)):
     ) for a in agents]
 
 
-@router.post("/agents", response_model=AgentResponse)
-async def create_agent(req: AgentCreate, token: str, db: AsyncSession = Depends(get_db)):
-    payload = get_current_user(token)
-
+@router.post("/agents")
+async def create_agent(req: AgentCreate, payload: dict = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     # Check agent limit
     result = await db.execute(
         select(AgentConfig).where(AgentConfig.tenant_id == payload["tenant_id"])
